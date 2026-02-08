@@ -11,22 +11,15 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
-
-          # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # Allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
-
-          # Restart the Remote Desktop service
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Secure Password
@@ -51,46 +44,29 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
 
-      # --- NEW STEP ADDED HERE ---
-      - name: Setup MostLogin (Download to Desktop)
+      # --- FIXED STEP: Download to Public Desktop ---
+      - name: Setup MostLogin (Download to Public Desktop)
         run: |
-          # Define the target path on the RDP User's Desktop
-          $desktopPath = "C:\Users\RDP\Desktop"
+          # We use the Public Desktop so it appears for the RDP user immediately
+          $desktopPath = "C:\Users\Public\Desktop"
           $installer = "$desktopPath\MostLogin_Setup.exe"
-          
-          # Ensure the directory exists (it should, but just to be safe)
-          if (!(Test-Path $desktopPath)) { New-Item -ItemType Directory -Force -Path $desktopPath }
-          
-          # Download MostLogin
-          # Using a common direct link pattern. If this 404s in the future, the file won't appear.
           $url = "https://oss-aws.mostlogin.com/app/MostLogin_Setup.exe"
           
           Write-Host "Downloading MostLogin to $installer..."
+          
           try {
-              Invoke-WebRequest -Uri $url -OutFile $installer
+              Invoke-WebRequest -Uri $url -OutFile $installer -UserAgent "Mozilla/5.0"
               Write-Host "Download Success! Installer is ready on the desktop."
           } catch {
-              Write-Warning "Primary download link failed. Attempting fallback..."
-              try {
-                  # Fallback to a generic name just in case
-                  Invoke-WebRequest -Uri "https://www.mostlogin.com/download/MostLogin_Setup.exe" -OutFile $installer
-              } catch {
-                  Write-Error "Could not download MostLogin. You may need to download it manually inside the RDP."
-              }
+              Write-Error "Download failed. Error details: $_"
           }
-      # ---------------------------
+      # ---------------------------------------------
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
@@ -98,7 +74,6 @@ jobs:
       - name: Establish Tailscale Connection
         run: |
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -106,7 +81,6 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
@@ -115,13 +89,11 @@ jobs:
       
       - name: Verify RDP Accessibility
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |
@@ -129,10 +101,9 @@ jobs:
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "MostLogin Installer: Located on the Desktop"
+          Write-Host "MostLogin Installer: On the Desktop (Public)"
           Write-Host "==================`n"
           
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
